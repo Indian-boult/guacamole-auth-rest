@@ -22,6 +22,7 @@ import org.apache.guacamole.GuacamoleException;
 import org.apache.guacamole.environment.Environment;
 import org.apache.guacamole.environment.LocalEnvironment;
 import org.apache.guacamole.properties.GuacamoleProperty;
+import org.apache.guacamole.properties.LongGuacamoleProperty;
 import org.apache.guacamole.properties.StringGuacamoleProperty;
 
 /**
@@ -34,6 +35,22 @@ class RestEnvironment implements AuthServiceConfig {
    * Default value for the {@link #AUTHORIZATION_URI} property.
    */
   private static final String DEFAULT_AUTHORIZATION_URI = "/authorization";
+
+  /**
+   * Property that specifies the cache duration in milliseconds.
+   */
+  private static final GuacamoleProperty<Long> CACHE_DURATION =
+      new LongGuacamoleProperty() {
+        @Override
+        public String getName() {
+          return "auth-rest-cache-duration";
+        }
+      };
+
+  /**
+   * Default cache duration (e.g., 5 minutes).
+   */
+  private static final long DEFAULT_CACHE_DURATION = 300000L;
 
   /**
    * Property that specifies the absolute URL for the REST service used to
@@ -253,6 +270,17 @@ class RestEnvironment implements AuthServiceConfig {
   @Override
   public String getDigestPassword() throws GuacamoleException {
     return delegate.getRequiredProperty(DIGEST_PASSWORD);
+  }
+
+  /**
+   * Gets the cache duration from the corresponding property.
+   *
+   * @return The cache duration in milliseconds.
+   *
+   * @throws GuacamoleException If an error occurs retrieving the property.
+   */
+  public long getCacheDuration() throws GuacamoleException {
+    return delegate.getProperty(CACHE_DURATION, DEFAULT_CACHE_DURATION);
   }
 
 }

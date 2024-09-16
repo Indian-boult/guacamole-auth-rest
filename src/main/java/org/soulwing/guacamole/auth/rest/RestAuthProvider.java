@@ -20,6 +20,7 @@ package org.soulwing.guacamole.auth.rest;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.guacamole.GuacamoleException;
 import org.apache.guacamole.GuacamoleServerException;
@@ -32,7 +33,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * An {@link AuthenticationProvider} that delegates to an {@link AuthService}
- * to authenticate and authorize Guacamole users.
+ * to authenticate and authorize Guacamole users, with caching functionality.
  */
 public class RestAuthProvider extends SimpleAuthenticationProvider {
 
@@ -40,6 +41,12 @@ public class RestAuthProvider extends SimpleAuthenticationProvider {
 
   /** Auth service facade to which we delegate the real work. */
   private final AuthService authService;
+
+  /** Cache to store authorized configurations per user. */
+  private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
+
+  /** Cache duration in milliseconds. */
+  private final long cacheDuration;
 
   /**
    * Constructs a new instance that delegates to the default {@link AuthService}
@@ -66,21 +73,32 @@ public class RestAuthProvider extends SimpleAuthenticationProvider {
       final RestEnvironment environment = new RestEnvironment();
       this.authService = authService;
       this.authService.init(environment);
-    }
-    catch (GuacamoleException ex) {
-      logger.error("initialization failed with error: {}", ex);
+
+      // Initialize cache duration from environment
+      this.cacheDuration = environment.getCacheDuration();
+      logger.info("Cache duration set to {} milliseconds", cacheDuration);
+    } catch (GuacamoleException ex) {
+      logger.error("Initialization failed with error: {}", ex.getMessage());
       if (logger.isDebugEnabled()) {
-        logger.debug("exception trace: {}", ex, ex);
+        logger.debug("Exception trace: ", ex);
       }
       throw ex;
     }
   }
 
   /**
+   * Gets the cache duration.
+   *
+   * @return The cache duration in milliseconds.
+   */
+  protected long getCacheDuration() {
+    return cacheDuration;
+  }
+
+  /**
    * Gets the identifier of this provider.
    *
-   * @return
-   *    The provider identifier.
+   * @return The provider identifier.
    */
   @Override
   public String getIdentifier() {
@@ -89,55 +107,67 @@ public class RestAuthProvider extends SimpleAuthenticationProvider {
 
   @Override
   @SuppressWarnings("unchecked")
-  public Map<String, GuacamoleConfiguration> getAuthorizedConfigurations(
-      Credentials credentials) throws GuacamoleException {
+  public Map<String, GuacamoleConfiguration> getAuthorizedConfigurations(Credentials credentials)
+      throws GuacamoleException {
     try {
-      if (logger.isDebugEnabled()) {
-        logger.debug("requesting authorization for user '{}' @ {} [{}]",
-            credentials.getUsername(), credentials.getRemoteHostname(),
-            credentials.getRemoteAddress());
+      String username = credentials.getUsername();
+      if (username == null) {
+        logger.debug("No username provided in credentials");
+        return null;
       }
 
-      final Map authResult = authService.authorize(
-          new DelegatingAuthSubject(credentials));
-
-      final Boolean authorized = (Boolean) authResult.get(
-          ProtocolConstants.AUTH_KEY);
+      // Check the cache first
+      CacheEntry cachedEntry = cache.get(username);
+      if (cachedEntry != null && !cachedEntry.isExpired(getCacheDuration())) {
+        logger.debug("Returning cached configurations for user '{}'", username);
+        return cachedEntry.getConfigurations();
+      } else {
+        logger.debug("No valid cache entry found for user '{}'", username);
+      }
 
       if (logger.isDebugEnabled()) {
-        logger.debug("user '{}' {} authorized", credentials.getUsername(),
-            authorized ? "is" : "is not");
+        logger.debug("Requesting authorization for user '{}' @ {} [{}]",
+            username, credentials.getRemoteHostname(), credentials.getRemoteAddress());
+      }
+
+      final Map authResult = authService.authorize(new DelegatingAuthSubject(credentials));
+
+      final Boolean authorized = (Boolean) authResult.get(ProtocolConstants.AUTH_KEY);
+
+      if (logger.isDebugEnabled()) {
+        logger.debug("User '{}' {} authorized", username, authorized ? "is" : "is not");
       }
 
       if (authorized == null || !authorized) return null;
 
-      return createGuacConfigs(
-          (Map) authResult.get(ProtocolConstants.CONFIGS_KEY));
-    }
-    catch (GuacamoleException ex) {
-      logger.error("authorized request ended in error {}: ", ex);
+      Map<String, GuacamoleConfiguration> configs =
+          createGuacConfigs((Map) authResult.get(ProtocolConstants.CONFIGS_KEY));
+
+      // Store in cache
+      cache.put(username, new CacheEntry(configs));
+
+      return configs;
+    } catch (GuacamoleException ex) {
+      logger.error("Authorization request ended in error: {}", ex.getMessage());
       if (logger.isDebugEnabled()) {
-        logger.debug("exception trace: {}", ex, ex);
+        logger.debug("Exception trace: ", ex);
       }
       throw ex;
     }
   }
 
-
-  private Map<String, GuacamoleConfiguration> createGuacConfigs(
-      Map configs) throws GuacamoleServerException {
+  private Map<String, GuacamoleConfiguration> createGuacConfigs(Map configs)
+      throws GuacamoleServerException {
 
     if (configs == null) {
       logger.error("REST service provided no configurations for user");
-      throw new GuacamoleServerException("configurations required");
+      throw new GuacamoleServerException("Configurations required");
     }
 
-    final Map<String, GuacamoleConfiguration> guacConfigs =
-        new LinkedHashMap<String, GuacamoleConfiguration>();
+    final Map<String, GuacamoleConfiguration> guacConfigs = new LinkedHashMap<>();
 
     for (final Object name : configs.keySet()) {
-      guacConfigs.put(name.toString(),
-          createGuacConfig((Map) configs.get(name)));
+      guacConfigs.put(name.toString(), createGuacConfig((Map) configs.get(name)));
     }
 
     return guacConfigs;
@@ -160,4 +190,24 @@ public class RestAuthProvider extends SimpleAuthenticationProvider {
     return guacConfig;
   }
 
+  /**
+   * Inner class to represent a cache entry.
+   */
+  private static class CacheEntry {
+    private final Map<String, GuacamoleConfiguration> configurations;
+    private final long timestamp;
+
+    CacheEntry(Map<String, GuacamoleConfiguration> configurations) {
+      this.configurations = configurations;
+      this.timestamp = System.currentTimeMillis();
+    }
+
+    Map<String, GuacamoleConfiguration> getConfigurations() {
+      return configurations;
+    }
+
+    boolean isExpired(long duration) {
+      return (System.currentTimeMillis() - timestamp) > duration;
+    }
+  }
 }
